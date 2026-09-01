@@ -1,0 +1,30 @@
+{
+  "name": "FrameworkDev",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "Packages": {
+        "$className": "Folder",
+        "Framework": {
+          "$path": "src"
+        }
+      }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "FrameworkExample": {
+        "$path": "examples/server"
+      }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "FrameworkExample": {
+          "$path": "examples/client"
+        }
+      }
+    }
+  }
+}

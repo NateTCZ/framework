@@ -1,0 +1,30 @@
+[package]
+name = "natetcz/framework"
+description = "A lightweight typed Service and Controller framework for Roblox"
+version = "0.1.0"
+license = "MIT"
+authors = ["NateTCZ"]
+realm = "shared"
+registry = "https://github.com/UpliftGames/wally-index"
+repository = "https://github.com/NateTCZ/framework"
+include = [
+    "src/**",
+    "default.project.json",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_LICENSES.md",
+]
+exclude = [
+    "aftman.toml",
+    "dev.project.json",
+    "dist",
+    "examples",
+    "model.project.json",
+    "scripts",
+    "selene.toml",
+    "stylua.toml",
+    "tests",
+]
+
+[dependencies]
+# GoodSignal is bundled for a dependency-free and self-contained Studio model.

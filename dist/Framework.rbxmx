@@ -1,0 +1,809 @@
+<roblox version="4">
+  <Item class="ModuleScript" referent="0">
+    <Properties>
+      <string name="Name">Framework</string>
+      <string name="Source"><![CDATA[--!strict
+
+local RunService = game:GetService("RunService")
+
+local Endpoint = require(script.Shared.Endpoint)
+local GoodSignal = require(script.Packages.GoodSignal)
+local Types = require(script.Shared.Types)
+local Runtime = if RunService:IsServer() then require(script.Server) else require(script.Client)
+
+local Framework = {}
+
+export type EndpointOptions = Endpoint.Options
+export type EndpointDescriptor = Endpoint.Descriptor
+export type Service = Types.Service
+export type Controller = Types.Controller
+
+Framework.CreateService = Runtime.CreateService
+Framework.CreateController = Runtime.CreateController
+Framework.GetService = Runtime.GetService
+Framework.GetController = Runtime.GetController
+Framework.AddServices = Runtime.AddServices
+Framework.AddControllers = Runtime.AddControllers
+Framework.Start = Runtime.Start
+
+function Framework.Signal(options: Endpoint.Options?): Endpoint.Descriptor
+	return Endpoint.new("Signal", options)
+end
+
+function Framework.ClientSignal(options: Endpoint.Options?): Endpoint.Descriptor
+	return Endpoint.new("ClientSignal", options)
+end
+
+function Framework.Method(options: Endpoint.Options?): Endpoint.Descriptor
+	return Endpoint.new("Method", options)
+end
+
+Framework.LocalSignal = GoodSignal
+
+return table.freeze(Framework)
+]]></string>
+    </Properties>
+    <Item class="ModuleScript" referent="1">
+      <Properties>
+        <string name="Name">Client</string>
+        <string name="Source"><![CDATA[--!strict
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Constants = require(script.Parent.Shared.Constants)
+local Loader = require(script.Parent.Shared.Loader)
+
+local Client = {}
+local controllers: { [string]: any } = {}
+local controllerOrder: { any } = {}
+local serviceProxies: { [string]: any } = {}
+local started = false
+
+local function registrationOpen()
+	if started then
+		error("[Framework] Cannot register controllers after Framework.Start().", 3)
+	end
+end
+
+function Client.CreateController(definition: any): any
+	registrationOpen()
+	assert(
+		type(definition) == "table" and type(definition.Name) == "string" and definition.Name ~= "",
+		"[Framework] CreateController requires a table with a non-empty Name."
+	)
+	if controllers[definition.Name] then
+		error(string.format('[Framework] Controller "%s" is already registered.', definition.Name), 2)
+	end
+	controllers[definition.Name] = definition
+	table.insert(controllerOrder, definition)
+	return definition
+end
+
+function Client.GetController(name: string): any
+	local controller = controllers[name]
+	if not controller then
+		error(
+			string.format(
+				'[Framework] Could not find controller "%s". Was it registered before Framework.Start()?',
+				tostring(name)
+			),
+			2
+		)
+	end
+	return controller
+end
+
+local function waitFor(parent: Instance, name: string): Instance
+	local child = parent:WaitForChild(name, Constants.REMOTE_TIMEOUT)
+	if not child then
+		error(string.format('[Framework] Timed out waiting for network member "%s".', name), 3)
+	end
+	return child
+end
+
+function Client.GetService(name: string): any
+	if serviceProxies[name] then
+		return serviceProxies[name]
+	end
+	local root = waitFor(ReplicatedStorage, Constants.NETWORK_ROOT)
+	waitFor(root, Constants.READY)
+	local serviceFolder = root:WaitForChild(name, Constants.REMOTE_TIMEOUT)
+	if not serviceFolder then
+		error(
+			string.format(
+				'[Framework] Could not find service "%s". Did the server register and start it?',
+				tostring(name)
+			),
+			2
+		)
+	end
+
+	local proxy = {}
+	local signals = waitFor(serviceFolder, Constants.SIGNALS)
+	local clientSignals = waitFor(serviceFolder, Constants.CLIENT_SIGNALS)
+	local methods = waitFor(serviceFolder, Constants.METHODS)
+	for _, remote in signals:GetChildren() do
+		if remote:IsA("RemoteEvent") then
+			proxy[remote.Name] = table.freeze({
+				Connect = function(_, callback)
+					return remote.OnClientEvent:Connect(callback)
+				end,
+				Once = function(_, callback)
+					return remote.OnClientEvent:Once(callback)
+				end,
+				Wait = function(_)
+					return remote.OnClientEvent:Wait()
+				end,
+			})
+		end
+	end
+	for _, remote in clientSignals:GetChildren() do
+		if remote:IsA("RemoteEvent") then
+			proxy[remote.Name] = table.freeze({
+				Fire = function(_, ...)
+					remote:FireServer(...)
+				end,
+			})
+		end
+	end
+	for _, remote in methods:GetChildren() do
+		if remote:IsA("RemoteFunction") then
+			proxy[remote.Name] = function(self, ...)
+				if self ~= proxy then
+					error(string.format("[Framework] Call %s:%s(...) with a colon.", name, remote.Name), 2)
+				end
+				return remote:InvokeServer(...)
+			end
+		end
+	end
+	serviceProxies[name] = table.freeze(proxy)
+	return serviceProxies[name]
+end
+
+function Client.CreateService(_definition: any): never
+	error("[Framework] CreateService() is server-only.", 2)
+end
+
+function Client.AddControllers(folder: Instance): { any }
+	registrationOpen()
+	return Loader.requireDescendants(folder)
+end
+
+function Client.AddServices(_folder: Instance): never
+	error("[Framework] AddServices() is server-only.", 2)
+end
+
+function Client.Start()
+	if started then
+		error("[Framework] Framework.Start() has already been called.", 2)
+	end
+	started = true
+	for _, controller in controllerOrder do
+		if controller.Init ~= nil then
+			local ok, message = pcall(controller.Init, controller)
+			if not ok then
+				error(string.format("[Framework] %s:Init() failed: %s", controller.Name, tostring(message)), 2)
+			end
+		end
+	end
+	for _, controller in controllerOrder do
+		if controller.Start ~= nil then
+			local ok, message = pcall(controller.Start, controller)
+			if not ok then
+				error(string.format("[Framework] %s:Start() failed: %s", controller.Name, tostring(message)), 2)
+			end
+		end
+	end
+end
+
+return Client
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="Folder" referent="2">
+      <Properties>
+        <string name="Name">Packages</string>
+      </Properties>
+      <Item class="ModuleScript" referent="3">
+        <Properties>
+          <string name="Name">GoodSignal</string>
+          <string name="Source"><![CDATA[--!nocheck
+-- GoodSignal by stravant (Mark Langen), MIT License.
+-- Source: https://github.com/stravant/goodsignal
+
+local freeRunnerThread = nil
+
+local function acquireRunnerThreadAndCallEventHandler(fn, ...)
+	local acquiredRunnerThread = freeRunnerThread
+	freeRunnerThread = nil
+	fn(...)
+	freeRunnerThread = acquiredRunnerThread
+end
+
+local function runEventHandlerInFreeThread()
+	while true do
+		acquireRunnerThreadAndCallEventHandler(coroutine.yield())
+	end
+end
+
+local Connection = {}
+Connection.__index = Connection
+
+function Connection.new(signal, fn)
+	return setmetatable({
+		_connected = true,
+		_signal = signal,
+		_fn = fn,
+		_next = false,
+	}, Connection)
+end
+
+function Connection:Disconnect()
+	self._connected = false
+	if self._signal._handlerListHead == self then
+		self._signal._handlerListHead = self._next
+	else
+		local prev = self._signal._handlerListHead
+		while prev and prev._next ~= self do
+			prev = prev._next
+		end
+		if prev then
+			prev._next = self._next
+		end
+	end
+end
+
+Connection.Destroy = Connection.Disconnect
+
+local Signal = {}
+Signal.__index = Signal
+
+function Signal.new()
+	return setmetatable({ _handlerListHead = false }, Signal)
+end
+
+function Signal:Connect(fn)
+	local connection = Connection.new(self, fn)
+	connection._next = self._handlerListHead
+	self._handlerListHead = connection
+	return connection
+end
+
+function Signal:DisconnectAll()
+	self._handlerListHead = false
+end
+
+function Signal:Fire(...)
+	local item = self._handlerListHead
+	while item do
+		if item._connected then
+			if not freeRunnerThread then
+				freeRunnerThread = coroutine.create(runEventHandlerInFreeThread)
+				coroutine.resume(freeRunnerThread)
+			end
+			task.spawn(freeRunnerThread, item._fn, ...)
+		end
+		item = item._next
+	end
+end
+
+function Signal:Wait()
+	local waitingCoroutine = coroutine.running()
+	local connection
+	connection = self:Connect(function(...)
+		connection:Disconnect()
+		task.spawn(waitingCoroutine, ...)
+	end)
+	return coroutine.yield()
+end
+
+function Signal:Once(fn)
+	local connection
+	connection = self:Connect(function(...)
+		if connection._connected then
+			connection:Disconnect()
+		end
+		fn(...)
+	end)
+	return connection
+end
+
+function Signal:Destroy()
+	self:DisconnectAll()
+end
+
+return Signal
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+    <Item class="ModuleScript" referent="4">
+      <Properties>
+        <string name="Name">Server</string>
+        <string name="Source"><![CDATA[--!strict
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Constants = require(script.Parent.Shared.Constants)
+local Endpoint = require(script.Parent.Shared.Endpoint)
+local Loader = require(script.Parent.Shared.Loader)
+
+type Descriptor = Endpoint.Descriptor
+
+local Server = {}
+local services: { [string]: any } = {}
+local serviceOrder: { any } = {}
+local specifications: { [any]: { [string]: Descriptor } } = {}
+local started = false
+
+local function registrationOpen()
+	if started then
+		error("[Framework] Cannot register services after Framework.Start().", 3)
+	end
+end
+
+local function validDefinition(definition: any): boolean
+	return type(definition) == "table" and type(definition.Name) == "string" and definition.Name ~= ""
+end
+
+function Server.CreateService(definition: any): any
+	registrationOpen()
+	assert(validDefinition(definition), "[Framework] CreateService requires a table with a non-empty Name.")
+	if services[definition.Name] then
+		error(string.format('[Framework] Service "%s" is already registered.', definition.Name), 2)
+	end
+
+	local client = definition.Client
+	local specs = {}
+	if client ~= nil then
+		if type(client) ~= "table" then
+			error(string.format("[Framework] %s.Client must be a table.", definition.Name), 2)
+		end
+		for name, endpoint in client do
+			if type(name) ~= "string" or not Endpoint.is(endpoint) then
+				error(
+					string.format(
+						"[Framework] %s.Client.%s must use Framework.Method(), Framework.Signal(), or Framework.ClientSignal().",
+						definition.Name,
+						tostring(name)
+					),
+					2
+				)
+			end
+			specs[name] = endpoint
+		end
+	else
+		definition.Client = {}
+	end
+
+	services[definition.Name] = definition
+	table.insert(serviceOrder, definition)
+	specifications[definition] = specs
+	return definition
+end
+
+function Server.GetService(name: string): any
+	local service = services[name]
+	if not service then
+		error(
+			string.format(
+				'[Framework] Could not find service "%s". Was it registered before Framework.Start()?',
+				tostring(name)
+			),
+			2
+		)
+	end
+	return service
+end
+
+function Server.GetController(name: string): never
+	error(
+		string.format(
+			'[Framework] Controllers are client-only; cannot get controller "%s" on the server.',
+			tostring(name)
+		),
+		2
+	)
+end
+
+function Server.AddServices(folder: Instance): { any }
+	registrationOpen()
+	return Loader.requireDescendants(folder)
+end
+
+function Server.AddControllers(_folder: Instance): never
+	error("[Framework] AddControllers() is client-only.", 2)
+end
+
+local function makeGate(serviceName: string, endpointName: string, options: any)
+	if next(options) == nil then
+		return nil
+	end
+
+	local states = setmetatable({}, { __mode = "k" })
+	return function(player: Player, ...): (boolean, string?)
+		local now = os.clock()
+		local state = states[player]
+		if not state then
+			state = { windowStart = now, count = 0, last = -math.huge }
+			states[player] = state
+		end
+
+		if options.Cooldown and now - state.last < options.Cooldown then
+			return false, "cooldown"
+		end
+		if options.RateLimit then
+			if now - state.windowStart >= options.Window then
+				state.windowStart = now
+				state.count = 0
+			end
+			if state.count >= options.RateLimit then
+				return false, "rate limit"
+			end
+		end
+		-- Consume abuse-control budget before validation so malformed traffic is
+		-- not able to run validators without being throttled.
+		state.last = now
+		state.count += 1
+
+		if options.Validate then
+			local ok, accepted, reason = pcall(options.Validate, player, ...)
+			if not ok then
+				warn(
+					string.format(
+						"[Framework] Validator for %s.%s errored: %s",
+						serviceName,
+						endpointName,
+						tostring(accepted)
+					)
+				)
+				return false, "validation failed"
+			end
+			if accepted ~= true then
+				return false, if type(reason) == "string" then reason else "validation failed"
+			end
+		end
+
+		return true
+	end
+end
+
+local function validateHandlers()
+	for _, service in serviceOrder do
+		for endpointName, descriptor in specifications[service] do
+			if descriptor._kind ~= "Signal" and type(service.Client[endpointName]) ~= "function" then
+				error(
+					string.format(
+						"[Framework] %s.Client:%s(Player, ...) must be implemented before Start().",
+						service.Name,
+						endpointName
+					),
+					3
+				)
+			end
+		end
+	end
+end
+
+local function createFolder(parent: Instance, name: string): Folder
+	local folder = Instance.new("Folder")
+	folder.Name = name
+	folder.Parent = parent
+	return folder
+end
+
+local function bindService(root: Folder, service: any)
+	local serviceFolder = createFolder(root, service.Name)
+	local signalFolder = createFolder(serviceFolder, Constants.SIGNALS)
+	local clientSignalFolder = createFolder(serviceFolder, Constants.CLIENT_SIGNALS)
+	local methodFolder = createFolder(serviceFolder, Constants.METHODS)
+
+	for endpointName, descriptor in specifications[service] do
+		local kind = descriptor._kind
+		if kind == "Signal" then
+			local remote = Instance.new("RemoteEvent")
+			remote.Name = endpointName
+			remote.Parent = signalFolder
+			local wrapper = {}
+			function wrapper:Fire(player: Player, ...)
+				remote:FireClient(player, ...)
+			end
+			function wrapper:FireAll(...)
+				remote:FireAllClients(...)
+			end
+			function wrapper:FireExcept(excludedPlayer: Player, ...)
+				for _, player in Players:GetPlayers() do
+					if player ~= excludedPlayer then
+						remote:FireClient(player, ...)
+					end
+				end
+			end
+			function wrapper:FireFor(targetPlayers: { Player }, ...)
+				for _, player in targetPlayers do
+					remote:FireClient(player, ...)
+				end
+			end
+			service.Client[endpointName] = table.freeze(wrapper)
+		elseif kind == "ClientSignal" then
+			local handler = service.Client[endpointName]
+			if type(handler) ~= "function" then
+				error(
+					string.format(
+						"[Framework] %s.Client:%s(Player, ...) must be implemented before Start().",
+						service.Name,
+						endpointName
+					),
+					3
+				)
+			end
+			local gate = makeGate(service.Name, endpointName, descriptor._options)
+			local remote = Instance.new("RemoteEvent")
+			remote.Name = endpointName
+			remote.Parent = clientSignalFolder
+			remote.OnServerEvent:Connect(function(player, ...)
+				if gate then
+					local allowed, reason = gate(player, ...)
+					if not allowed then
+						warn(
+							string.format(
+								"[Framework] Rejected %s.%s from %s (%s).",
+								service.Name,
+								endpointName,
+								player.Name,
+								reason or "rejected"
+							)
+						)
+						return
+					end
+				end
+				local ok, message = pcall(handler, service.Client, player, ...)
+				if not ok then
+					warn(
+						string.format(
+							"[Framework] %s.%s handler failed: %s",
+							service.Name,
+							endpointName,
+							tostring(message)
+						)
+					)
+				end
+			end)
+		elseif kind == "Method" then
+			local handler = service.Client[endpointName]
+			if type(handler) ~= "function" then
+				error(
+					string.format(
+						"[Framework] %s.Client:%s(Player, ...) must be implemented before Start().",
+						service.Name,
+						endpointName
+					),
+					3
+				)
+			end
+			local gate = makeGate(service.Name, endpointName, descriptor._options)
+			local remote = Instance.new("RemoteFunction")
+			remote.Name = endpointName
+			remote.Parent = methodFolder
+			remote.OnServerInvoke = function(player, ...)
+				if gate then
+					local allowed = gate(player, ...)
+					if not allowed then
+						error("[Framework] Request rejected.", 0)
+					end
+				end
+				local results = table.pack(pcall(handler, service.Client, player, ...))
+				if not results[1] then
+					warn(
+						string.format(
+							"[Framework] %s.%s request failed: %s",
+							service.Name,
+							endpointName,
+							tostring(results[2])
+						)
+					)
+					error("[Framework] Request failed.", 0)
+				end
+				return table.unpack(results, 2, results.n)
+			end
+		end
+	end
+end
+
+function Server.Start()
+	if started then
+		error("[Framework] Framework.Start() has already been called.", 2)
+	end
+	started = true
+
+	for _, service in serviceOrder do
+		if service.Init ~= nil then
+			if type(service.Init) ~= "function" then
+				error(string.format("[Framework] %s.Init must be a function.", service.Name), 2)
+			end
+			local ok, message = pcall(service.Init, service)
+			if not ok then
+				error(string.format("[Framework] %s:Init() failed: %s", service.Name, tostring(message)), 2)
+			end
+		end
+	end
+	validateHandlers()
+
+	local existing = ReplicatedStorage:FindFirstChild(Constants.NETWORK_ROOT)
+	if existing then
+		error(string.format('[Framework] ReplicatedStorage already contains "%s".', Constants.NETWORK_ROOT), 2)
+	end
+	local root = createFolder(ReplicatedStorage, Constants.NETWORK_ROOT)
+	root:SetAttribute("Owner", Constants.NAME)
+	for _, service in serviceOrder do
+		bindService(root, service)
+	end
+	local ready = Instance.new("BoolValue")
+	ready.Name = Constants.READY
+	ready.Value = true
+	ready.Parent = root
+
+	for _, service in serviceOrder do
+		if service.Start ~= nil then
+			if type(service.Start) ~= "function" then
+				error(string.format("[Framework] %s.Start must be a function.", service.Name), 2)
+			end
+			local ok, message = pcall(service.Start, service)
+			if not ok then
+				error(string.format("[Framework] %s:Start() failed: %s", service.Name, tostring(message)), 2)
+			end
+		end
+	end
+end
+
+return Server
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="Folder" referent="5">
+      <Properties>
+        <string name="Name">Shared</string>
+      </Properties>
+      <Item class="ModuleScript" referent="6">
+        <Properties>
+          <string name="Name">Constants</string>
+          <string name="Source"><![CDATA[--!strict
+
+return table.freeze({
+	NAME = "Framework",
+	NETWORK_ROOT = "__FrameworkNetwork",
+	SIGNALS = "Signals",
+	CLIENT_SIGNALS = "ClientSignals",
+	METHODS = "Methods",
+	READY = "Ready",
+	REMOTE_TIMEOUT = 10,
+})
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="7">
+        <Properties>
+          <string name="Name">Endpoint</string>
+          <string name="Source"><![CDATA[--!strict
+
+local Endpoint = {}
+
+export type Kind = "Signal" | "ClientSignal" | "Method"
+export type Options = {
+	RateLimit: number?,
+	Window: number?,
+	Cooldown: number?,
+	Validate: ((Player, ...any) -> (boolean, string?))?,
+}
+export type Descriptor = {
+	_kind: Kind,
+	_options: Options,
+}
+
+local function validateOptions(options: Options?)
+	if options == nil then
+		return
+	end
+	if options.RateLimit ~= nil then
+		assert(type(options.RateLimit) == "number" and options.RateLimit > 0, "RateLimit must be a positive number")
+		assert(
+			type(options.Window) == "number" and options.Window > 0,
+			"Window must be a positive number when RateLimit is set"
+		)
+	elseif options.Window ~= nil then
+		error("Window requires RateLimit", 3)
+	end
+	if options.Cooldown ~= nil then
+		assert(type(options.Cooldown) == "number" and options.Cooldown >= 0, "Cooldown must be a non-negative number")
+	end
+	if options.Validate ~= nil then
+		assert(type(options.Validate) == "function", "Validate must be a function")
+	end
+end
+
+function Endpoint.new(kind: Kind, options: Options?): Descriptor
+	validateOptions(options)
+	return table.freeze({
+		_kind = kind,
+		_options = if options then table.clone(options) else {},
+	}) :: any
+end
+
+function Endpoint.is(value: any): boolean
+	return type(value) == "table"
+		and (value._kind == "Signal" or value._kind == "ClientSignal" or value._kind == "Method")
+		and type(value._options) == "table"
+end
+
+return Endpoint
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">Loader</string>
+          <string name="Source"><![CDATA[--!strict
+
+local Loader = {}
+
+function Loader.requireDescendants(root: Instance): { any }
+	assert(typeof(root) == "Instance", "Expected an Instance folder")
+	local modules = {}
+	for _, descendant in root:GetDescendants() do
+		if descendant:IsA("ModuleScript") then
+			table.insert(modules, descendant)
+		end
+	end
+	table.sort(modules, function(a, b)
+		return a:GetFullName() < b:GetFullName()
+	end)
+
+	local results = {}
+	for _, module in modules do
+		local ok, result = pcall(require, module)
+		if not ok then
+			error(string.format('[Framework] Failed to load "%s": %s', module:GetFullName(), tostring(result)), 3)
+		end
+		table.insert(results, result)
+	end
+	return results
+end
+
+return Loader
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
+        <Properties>
+          <string name="Name">Types</string>
+          <string name="Source"><![CDATA[--!strict
+
+export type EndpointOptions = {
+	RateLimit: number?,
+	Window: number?,
+	Cooldown: number?,
+	Validate: ((Player, ...any) -> (boolean, string?))?,
+}
+
+export type Service = {
+	Name: string,
+	Client: { [string]: any }?,
+	Init: ((self: any) -> ())?,
+	Start: ((self: any) -> ())?,
+	[string]: any,
+}
+
+export type Controller = {
+	Name: string,
+	Init: ((self: any) -> ())?,
+	Start: ((self: any) -> ())?,
+	[string]: any,
+}
+
+return table.freeze({})
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+</roblox>
