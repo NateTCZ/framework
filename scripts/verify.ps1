@@ -11,7 +11,7 @@ try {
 	$xml = Join-Path $repositoryRoot "dist/Framework.rbxmx"
 	if ((Get-Item $binary).Length -lt 1000) { throw "Framework.rbxm is unexpectedly small." }
 	$xmlText = Get-Content -Raw -LiteralPath $xml
-	foreach ($required in @("Server", "Client", "Endpoint", "GoodSignal")) {
+	foreach ($required in @("Server", "Client", "Endpoint", "GoodSignal", "Vendor")) {
 		if (-not $xmlText.Contains($required)) { throw "Framework.rbxmx is missing $required." }
 	}
 	Write-Host "Static checks and model-content verification passed."

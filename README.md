@@ -17,7 +17,7 @@ After publishing under your Wally scope, add:
 
 ```toml
 [dependencies]
-Framework = "natetcz/framework@0.1.0"
+Framework = "natetcz/framework@0.1.1"
 ```
 
 Then run `wally install` and map the generated Packages directory in Rojo. The
@@ -263,6 +263,11 @@ rojo serve dev.project.json
 `src` source tree. `verify.ps1` runs StyLua and Selene checks, rebuilds both
 models, checks the binary is nontrivial, and checks the XML model contains the
 server, client, endpoint, and bundled Signal modules.
+
+`build-wally.ps1` creates a clean, flat Wally publication directory at
+`build/wally`. It copies the runtime from `src` without duplicating source
+maintenance. Publish from that directory with
+`wally publish --project-path build/wally`.
 
 The examples directory contains `TestService`, `SecondaryService`,
 `TestController`, and `SecondaryController`. It demonstrates both networking

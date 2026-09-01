@@ -2,7 +2,7 @@
 
 ## GoodSignal
 
-GoodSignal is bundled at `src/Packages/GoodSignal.lua` so `Framework.rbxm` has no
+GoodSignal is bundled at `src/Vendor/GoodSignal.lua` so `Framework.rbxm` has no
 external runtime dependencies.
 
 - Project: https://github.com/stravant/goodsignal
