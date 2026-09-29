@@ -22,8 +22,6 @@ $vendorPath = Join-Path $resolvedOutput "Vendor"
 if (Test-Path -LiteralPath $vendorPath) {
 	Remove-Item -Recurse -Force -LiteralPath $vendorPath
 }
-Copy-Item -Force -LiteralPath (Join-Path $repositoryRoot "wally.project.json") -Destination (Join-Path $resolvedOutput "default.project.json")
-
 $manifest = Get-Content -Raw -LiteralPath (Join-Path $repositoryRoot "wally.toml")
 $manifest = [regex]::Replace($manifest, '(?ms)^include\s*=\s*\[.*?^\]\s*', '')
 $manifest = [regex]::Replace($manifest, '(?ms)^exclude\s*=\s*\[.*?^\]\s*', '')

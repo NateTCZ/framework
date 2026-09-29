@@ -17,7 +17,7 @@ After publishing under your Wally scope, add:
 
 ```toml
 [dependencies]
-Framework = "natetcz/framework@0.1.2"
+Framework = "natetcz/framework@0.1.3"
 ```
 
 Then run `wally install` and map the generated Packages directory in Rojo. The
@@ -268,7 +268,8 @@ server, client, endpoint, and bundled Signal modules.
 
 `build-wally.ps1` creates a clean, flat Wally publication directory at
 `build/wally`. It copies the runtime from `src` without duplicating source
-maintenance. Publish from that directory with
+maintenance. The flat directory intentionally has no nested Rojo project file;
+Rojo's `init.lua` convention turns it into the package ModuleScript. Publish it with
 `wally publish --project-path build/wally`.
 
 The examples directory contains `TestService`, `SecondaryService`,
