@@ -16,6 +16,12 @@ if (Test-Path -LiteralPath $resolvedOutput) {
 New-Item -ItemType Directory -Force -Path $resolvedOutput | Out-Null
 
 Copy-Item -Recurse -Force -Path (Join-Path $sourcePath "*") -Destination $resolvedOutput
+# Wally supplies GoodSignal from the declared dependency. The vendored copy is
+# retained only in source/model builds for self-contained Studio distribution.
+$vendorPath = Join-Path $resolvedOutput "Vendor"
+if (Test-Path -LiteralPath $vendorPath) {
+	Remove-Item -Recurse -Force -LiteralPath $vendorPath
+}
 Copy-Item -Force -LiteralPath (Join-Path $repositoryRoot "wally.project.json") -Destination (Join-Path $resolvedOutput "default.project.json")
 
 $manifest = Get-Content -Raw -LiteralPath (Join-Path $repositoryRoot "wally.toml")

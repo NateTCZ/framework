@@ -11,9 +11,6 @@
     },
     "Shared": {
       "$path": "Shared"
-    },
-    "Vendor": {
-      "$path": "Vendor"
     }
   }
 }

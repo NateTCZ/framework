@@ -24,9 +24,15 @@
 local RunService = game:GetService("RunService")
 
 local Endpoint = require(script.Shared.Endpoint)
-local GoodSignal = require(script.Vendor.GoodSignal)
 local Types = require(script.Shared.Types)
 local Runtime = if RunService:IsServer() then require(script.Server) else require(script.Client)
+
+-- Wally installs declared dependencies beside this package. Standalone model
+-- builds use the vendored fallback so Framework.rbxm stays self-contained.
+local goodSignalModule = script.Parent:FindFirstChild("GoodSignal")
+	or (script:FindFirstChild("Vendor") and script.Vendor:FindFirstChild("GoodSignal"))
+assert(goodSignalModule, "[Framework] GoodSignal dependency is missing. Run wally install or use Framework.rbxm.")
+local GoodSignal = require(goodSignalModule)
 
 local Framework = {}
 

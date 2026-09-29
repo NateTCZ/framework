@@ -17,7 +17,7 @@ After publishing under your Wally scope, add:
 
 ```toml
 [dependencies]
-Framework = "natetcz/framework@0.1.1"
+Framework = "natetcz/framework@0.1.2"
 ```
 
 Then run `wally install` and map the generated Packages directory in Rojo. The
@@ -217,9 +217,11 @@ changed:Fire("value")
 connection:Disconnect()
 ```
 
-GoodSignal is MIT-licensed; attribution is preserved in
-`THIRD_PARTY_LICENSES.md` and the bundled source. No cleanup or Promise package
-is included because neither is needed by the framework runtime.
+GoodSignal is an explicit Wally dependency (`stravant/goodsignal@0.2.1`). The
+standalone `.rbxm` distribution bundles the same MIT-licensed implementation so
+Studio-only users do not need Wally. Attribution is preserved in
+`THIRD_PARTY_LICENSES.md` and the model source. No cleanup or Promise package is
+included because neither is needed by the framework runtime.
 
 ## Performance
 

@@ -1,7 +1,7 @@
 [package]
 name = "natetcz/framework"
 description = "A lightweight typed Service and Controller framework for Roblox"
-version = "0.1.1"
+version = "0.1.2"
 license = "MIT"
 authors = ["NateTCZ"]
 realm = "shared"
@@ -27,4 +27,4 @@ exclude = [
 ]
 
 [dependencies]
-# GoodSignal is bundled for a dependency-free and self-contained Studio model.
+GoodSignal = "stravant/goodsignal@0.2.1"
