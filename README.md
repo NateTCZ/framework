@@ -20,9 +20,8 @@ After publishing under your Wally scope, add:
 Framework = "natetcz/framework@0.2.0"
 ```
 
-Then run `wally install` and map the generated Packages directory in Rojo. The
-package has no transitive Wally dependencies because its one utility dependency
-is bundled.
+Then run `wally install` and map the generated Packages directory in Rojo. Wally
+also installs the package's one dependency, `stravant/goodsignal@0.2.1`.
 
 ### Rojo
 
