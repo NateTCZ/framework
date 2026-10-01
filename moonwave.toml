@@ -11,8 +11,3 @@ tagline = "A small, typed Service/Controller framework for Roblox"
 [home]
 enabled = true
 includeReadme = true
-
-[navbar]
-items = [
-	{ href = "https://github.com/NateTCZ/framework", label = "GitHub", position = "right" },
-]
