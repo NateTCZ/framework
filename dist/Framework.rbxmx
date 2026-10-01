@@ -24,44 +24,247 @@
 local RunService = game:GetService("RunService")
 
 local Endpoint = require(script.Shared.Endpoint)
+local Signal = require(script.Shared.Signal)
 local Types = require(script.Shared.Types)
-local Runtime = if RunService:IsServer() then require(script.Server) else require(script.Client)
+-- Typed as any: the server and client runtimes differ, and each public member
+-- below declares the signature users see instead.
+local Runtime: any = if RunService:IsServer() then require(script.Server) else require(script.Client)
 
--- Wally installs declared dependencies beside this package. Standalone model
--- builds use the vendored fallback so Framework.rbxm stays self-contained.
-local goodSignalModule = script.Parent:FindFirstChild("GoodSignal")
-	or (script:FindFirstChild("Vendor") and script.Vendor:FindFirstChild("GoodSignal"))
-assert(goodSignalModule, "[Framework] GoodSignal dependency is missing. Run wally install or use Framework.rbxm.")
-local GoodSignal = require(goodSignalModule)
+--[=[
+	@class Framework
 
+	A small, typed Service/Controller framework for Roblox.
+
+	Services run on the server and Controllers run on the client. Each has an
+	optional lifecycle: `Init`, then `Start`, then `PlayerAdded` /
+	`PlayerRemoving`. Services expose networking by declaring endpoints in their
+	`Client` table.
+]=]
 local Framework = {}
 
 export type EndpointOptions = Endpoint.Options
 export type EndpointDescriptor = Endpoint.Descriptor
 export type Service = Types.Service
 export type Controller = Types.Controller
+export type Connection = Types.Connection
+export type RemoteSignal<T...> = Types.RemoteSignal<T...>
+export type RemoteClientSignal<T...> = Types.RemoteClientSignal<T...>
+export type RemoteProperty<T> = Types.RemoteProperty<T>
+export type ServerSignal<T...> = Types.ServerSignal<T...>
+export type ServerProperty<T> = Types.ServerProperty<T>
 
-Framework.CreateService = Runtime.CreateService
-Framework.CreateController = Runtime.CreateController
-Framework.GetService = Runtime.GetService
-Framework.GetController = Runtime.GetController
-Framework.AddServices = Runtime.AddServices
-Framework.AddControllers = Runtime.AddControllers
-Framework.Start = Runtime.Start
+--[=[
+	@interface EndpointOptions
+	@within Framework
+	.RateLimit number? -- Maximum accepted calls per `Window` seconds, per player.
+	.Window number? -- Length of the rate-limit window in seconds. Required with `RateLimit`.
+	.Cooldown number? -- Minimum seconds between accepted calls, per player.
+	.Validate ((Player, ...any) -> (boolean, string?))? -- Return `true` to accept the call.
+	.Unreliable boolean? -- Use an `UnreliableRemoteEvent`. Signals and ClientSignals only.
 
+	Security options apply to client-to-server endpoints (`ClientSignal` and
+	`Method`). Validation is a shape and abuse guard, not authorization: handlers
+	must still check ownership, prices, distance, and other game rules.
+]=]
+
+--[=[
+	@function CreateService
+	@within Framework
+	@server
+	@param definition Service
+	@return Service
+
+	Registers a service. Declare client-facing endpoints in `definition.Client`.
+	Inside `Client` handlers, `self.Server` refers back to the service.
+]=]
+Framework.CreateService = Runtime.CreateService :: (definition: Service) -> any
+
+--[=[
+	@function CreateController
+	@within Framework
+	@client
+	@param definition Controller
+	@return Controller
+
+	Registers a controller.
+]=]
+Framework.CreateController = Runtime.CreateController :: (definition: Controller) -> any
+
+--[=[
+	@function GetService
+	@within Framework
+	@param name string
+	@return any
+
+	On the server, returns the service table. On the client, returns a cached,
+	frozen proxy containing only the service's declared endpoints. Cast the
+	result to a type built from [RemoteSignal], [RemoteClientSignal], and
+	[RemoteProperty] for autocomplete.
+]=]
+Framework.GetService = Runtime.GetService :: (name: string) -> any
+
+--[=[
+	@function GetController
+	@within Framework
+	@client
+	@param name string
+	@return Controller
+]=]
+Framework.GetController = Runtime.GetController :: (name: string) -> any
+
+--[=[
+	@function AddServices
+	@within Framework
+	@server
+	@param folder Instance
+	@return {any}
+
+	Requires every ModuleScript under `folder`, sorted by full name.
+]=]
+Framework.AddServices = Runtime.AddServices :: (folder: Instance) -> { any }
+
+--[=[
+	@function AddControllers
+	@within Framework
+	@client
+	@param folder Instance
+	@return {any}
+
+	Requires every ModuleScript under `folder`, sorted by full name.
+]=]
+Framework.AddControllers = Runtime.AddControllers :: (folder: Instance) -> { any }
+
+--[=[
+	@function Start
+	@within Framework
+
+	Runs every `Init` in registration order, publishes networking (server), then
+	spawns every `Start` on its own thread and begins `PlayerAdded` and
+	`PlayerRemoving` hooks. Can only be called once; registration closes when it is.
+]=]
+Framework.Start = Runtime.Start :: () -> ()
+
+--[=[
+	@function OnStart
+	@within Framework
+	@yields
+
+	Yields until `Framework.Start()` has finished, or returns immediately if it
+	already has. Useful in scripts outside the framework.
+]=]
+Framework.OnStart = Runtime.OnStart :: () -> ()
+
+--[=[
+	@within Framework
+	@param options EndpointOptions?
+	@return EndpointDescriptor
+
+	Declares a server-to-client event. After `Start`, it becomes a
+	[ServerSignal] on the server and a [RemoteSignal] on the client.
+]=]
 function Framework.Signal(options: Endpoint.Options?): Endpoint.Descriptor
 	return Endpoint.new("Signal", options)
 end
 
+--[=[
+	@within Framework
+	@param options EndpointOptions?
+	@return EndpointDescriptor
+
+	Declares a client-to-server event. Implement it as
+	`function Service.Client:Name(player, ...)`. On the client it is a
+	[RemoteClientSignal].
+]=]
 function Framework.ClientSignal(options: Endpoint.Options?): Endpoint.Descriptor
 	return Endpoint.new("ClientSignal", options)
 end
 
+--[=[
+	@within Framework
+	@param options EndpointOptions?
+	@return EndpointDescriptor
+
+	Declares a client-to-server request. Implement it as
+	`function Service.Client:Name(player, ...)` and call it on the client as
+	`Service:Name(...)`. Handler errors are logged on the server; the client only
+	receives a generic failure.
+]=]
 function Framework.Method(options: Endpoint.Options?): Endpoint.Descriptor
 	return Endpoint.new("Method", options)
 end
 
-Framework.LocalSignal = GoodSignal
+--[=[
+	@within Framework
+	@param initialValue any
+	@return EndpointDescriptor
+
+	Declares a replicated value. It becomes a [ServerProperty] on the server
+	(usable from `Init` onward) and a [RemoteProperty] on the client.
+]=]
+function Framework.Property(initialValue: any): Endpoint.Descriptor
+	return Endpoint.property(initialValue)
+end
+
+--[=[
+	@prop LocalSignal GoodSignal
+	@within Framework
+
+	The bundled GoodSignal class, for in-process events:
+	`Framework.LocalSignal.new()`.
+]=]
+Framework.LocalSignal = Signal
+
+--[=[
+	@interface RemoteSignal
+	@within Framework
+	.Connect (self, callback: (T...) -> ()) -> Connection
+	.Once (self, callback: (T...) -> ()) -> Connection
+	.Wait (self) -> T...
+
+	Client view of a [Framework.Signal].
+]=]
+
+--[=[
+	@interface RemoteClientSignal
+	@within Framework
+	.Fire (self, T...) -> ()
+
+	Client view of a [Framework.ClientSignal].
+]=]
+
+--[=[
+	@interface RemoteProperty
+	@within Framework
+	.Get (self) -> T -- The current value for this player.
+	.Observe (self, callback: (T) -> ()) -> Connection -- Calls `callback` now and on every change.
+	.Changed RemoteSignal -- Fires with the new value on every change.
+
+	Client view of a [Framework.Property].
+]=]
+
+--[=[
+	@interface ServerSignal
+	@within Framework
+	.Fire (self, player: Player, T...) -> ()
+	.FireAll (self, T...) -> ()
+	.FireExcept (self, player: Player, T...) -> ()
+	.FireFor (self, players: {Player}, T...) -> ()
+
+	Server view of a [Framework.Signal], available from `Start` onward.
+]=]
+
+--[=[
+	@interface ServerProperty
+	@within Framework
+	.Get (self) -> T
+	.Set (self, value: T) -> () -- Sets the value for every player without an override.
+	.GetFor (self, player: Player) -> T
+	.SetFor (self, player: Player, value: T) -> () -- Overrides the value for one player.
+	.ClearFor (self, player: Player) -> () -- Removes a player's override.
+
+	Server view of a [Framework.Property]. Tables always replicate when set, so
+	set a table again after mutating it.
+]=]
 
 return table.freeze(Framework)
 ]]></string>
@@ -74,13 +277,17 @@ return table.freeze(Framework)
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(script.Parent.Shared.Constants)
+local Lifecycle = require(script.Parent.Shared.Lifecycle)
 local Loader = require(script.Parent.Shared.Loader)
+local Signal = require(script.Parent.Shared.Signal)
 
 local Client = {}
 local controllers: { [string]: any } = {}
 local controllerOrder: { any } = {}
 local serviceProxies: { [string]: any } = {}
 local started = false
+local finished = false
+local startCompleted = Signal.new()
 
 local function registrationOpen()
 	if started then
@@ -124,6 +331,57 @@ local function waitFor(parent: Instance, name: string): Instance
 	return child
 end
 
+-- Read-only view of anything with Connect/Once/Wait (RBXScriptSignal or GoodSignal).
+local function listenOnly(event: any)
+	return table.freeze({
+		Connect = function(_, callback)
+			return event:Connect(callback)
+		end,
+		Once = function(_, callback)
+			return event:Once(callback)
+		end,
+		Wait = function(_)
+			return event:Wait()
+		end,
+	})
+end
+
+local function bindProperties(proxy: { [string]: any }, serviceFolder: Instance)
+	local remotes = waitFor(serviceFolder, Constants.PROPERTIES):GetChildren()
+	if #remotes == 0 then
+		return
+	end
+
+	local states = {}
+	for _, remote in remotes do
+		if remote:IsA("RemoteEvent") then
+			local state = { value = nil :: any, changed = Signal.new() }
+			states[remote.Name] = state
+			-- Listen before requesting the snapshot. Remotes are ordered, so a change
+			-- that arrives before the snapshot reply is older than the snapshot.
+			remote.OnClientEvent:Connect(function(value)
+				state.value = value
+				state.changed:Fire(value)
+			end)
+			proxy[remote.Name] = table.freeze({
+				Get = function(_)
+					return state.value
+				end,
+				Observe = function(_, callback)
+					task.spawn(callback, state.value)
+					return state.changed:Connect(callback)
+				end,
+				Changed = listenOnly(state.changed),
+			})
+		end
+	end
+
+	local snapshot = (waitFor(serviceFolder, Constants.PROPERTY_SNAPSHOT) :: RemoteFunction):InvokeServer()
+	for name, state in states do
+		state.value = snapshot[name]
+	end
+end
+
 function Client.GetService(name: string): any
 	if serviceProxies[name] then
 		return serviceProxies[name]
@@ -141,30 +399,22 @@ function Client.GetService(name: string): any
 		)
 	end
 
-	local proxy = {}
+	local proxy: { [string]: any } = {}
 	local signals = waitFor(serviceFolder, Constants.SIGNALS)
 	local clientSignals = waitFor(serviceFolder, Constants.CLIENT_SIGNALS)
 	local methods = waitFor(serviceFolder, Constants.METHODS)
 	for _, remote in signals:GetChildren() do
-		if remote:IsA("RemoteEvent") then
-			proxy[remote.Name] = table.freeze({
-				Connect = function(_, callback)
-					return remote.OnClientEvent:Connect(callback)
-				end,
-				Once = function(_, callback)
-					return remote.OnClientEvent:Once(callback)
-				end,
-				Wait = function(_)
-					return remote.OnClientEvent:Wait()
-				end,
-			})
+		-- BaseRemoteEvent covers both RemoteEvent and UnreliableRemoteEvent.
+		if remote:IsA("BaseRemoteEvent") then
+			proxy[remote.Name] = listenOnly((remote :: RemoteEvent).OnClientEvent)
 		end
 	end
 	for _, remote in clientSignals:GetChildren() do
-		if remote:IsA("RemoteEvent") then
+		if remote:IsA("BaseRemoteEvent") then
+			local event = remote :: RemoteEvent
 			proxy[remote.Name] = table.freeze({
 				Fire = function(_, ...)
-					remote:FireServer(...)
+					event:FireServer(...)
 				end,
 			})
 		end
@@ -178,6 +428,12 @@ function Client.GetService(name: string): any
 				return remote:InvokeServer(...)
 			end
 		end
+	end
+	bindProperties(proxy, serviceFolder)
+
+	-- Another thread may have built this proxy while the snapshot was in flight.
+	if serviceProxies[name] then
+		return serviceProxies[name]
 	end
 	serviceProxies[name] = table.freeze(proxy)
 	return serviceProxies[name]
@@ -196,39 +452,23 @@ function Client.AddServices(_folder: Instance): never
 	error("[Framework] AddServices() is server-only.", 2)
 end
 
+function Client.OnStart()
+	if not finished then
+		startCompleted:Wait()
+	end
+end
+
 function Client.Start()
 	if started then
 		error("[Framework] Framework.Start() has already been called.", 2)
 	end
 	started = true
-	for _, controller in controllerOrder do
-		if controller.Init ~= nil then
-			if type(controller.Init) ~= "function" then
-				error(string.format("[Framework] %s.Init must be a function.", controller.Name), 2)
-			end
-			local ok, message = pcall(controller.Init, controller)
-			if not ok then
-				error(string.format("[Framework] %s:Init() failed: %s", controller.Name, tostring(message)), 2)
-			end
-		end
-	end
-	for _, controller in controllerOrder do
-		if controller.Start ~= nil and type(controller.Start) ~= "function" then
-			error(string.format("[Framework] %s.Start must be a function.", controller.Name), 2)
-		end
-	end
-	-- Each Start runs on its own thread (in registration order) so a long-running
-	-- or yielding Start cannot block the controllers registered after it.
-	for _, controller in controllerOrder do
-		if controller.Start ~= nil then
-			task.spawn(function()
-				local ok, message = xpcall(controller.Start, debug.traceback, controller)
-				if not ok then
-					warn(string.format("[Framework] %s:Start() failed: %s", controller.Name, tostring(message)))
-				end
-			end)
-		end
-	end
+
+	Lifecycle.validate(controllerOrder)
+	Lifecycle.init(controllerOrder)
+	Lifecycle.start(controllerOrder)
+	finished = true
+	startCompleted:Fire()
 end
 
 return Client
@@ -250,7 +490,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(script.Parent.Shared.Constants)
 local Endpoint = require(script.Parent.Shared.Endpoint)
+local Gate = require(script.Parent.Shared.Gate)
+local Lifecycle = require(script.Parent.Shared.Lifecycle)
 local Loader = require(script.Parent.Shared.Loader)
+local Property = require(script.Parent.Shared.Property)
+local Signal = require(script.Parent.Shared.Signal)
+local WarnThrottle = require(script.Parent.Shared.WarnThrottle)
 
 type Descriptor = Endpoint.Descriptor
 
@@ -259,6 +504,12 @@ local services: { [string]: any } = {}
 local serviceOrder: { any } = {}
 local specifications: { [any]: { [string]: Descriptor } } = {}
 local started = false
+local finished = false
+local startCompleted = Signal.new()
+
+-- Rejections and handler failures can be triggered by any client at will, so
+-- their warnings are throttled per player and endpoint.
+local throttledWarn = WarnThrottle.new(Constants.WARN_INTERVAL, warn)
 
 local function registrationOpen()
 	if started then
@@ -296,7 +547,8 @@ function Server.CreateService(definition: any): any
 			if type(name) ~= "string" or not Endpoint.is(endpoint) then
 				error(
 					string.format(
-						"[Framework] %s.Client.%s must use Framework.Method(), Framework.Signal(), or Framework.ClientSignal().",
+						"[Framework] %s.Client.%s must use Framework.Method(), Framework.Signal(), "
+							.. "Framework.ClientSignal(), or Framework.Property().",
 						definition.Name,
 						tostring(name)
 					),
@@ -307,6 +559,13 @@ function Server.CreateService(definition: any): any
 		end
 	else
 		definition.Client = {}
+	end
+	-- Properties are usable immediately (e.g. Set in Init); they start
+	-- replicating once Start publishes networking.
+	for name, descriptor in specs do
+		if descriptor._kind == "Property" then
+			definition.Client[name] = Property.new(descriptor._initial)
+		end
 	end
 	-- Knit-compatible back-reference so Client handlers can reach server-only
 	-- methods via self.Server. Never replicated: only declared specs create remotes.
@@ -347,70 +606,38 @@ function Server.AddServices(folder: Instance): { any }
 	return Loader.requireDescendants(folder)
 end
 
+function Server.CreateController(_definition: any): never
+	error("[Framework] CreateController() is client-only.", 2)
+end
+
 function Server.AddControllers(_folder: Instance): never
 	error("[Framework] AddControllers() is client-only.", 2)
 end
 
-local function makeGate(serviceName: string, endpointName: string, options: any)
-	if next(options) == nil then
-		return nil
-	end
-
-	local states = setmetatable({}, { __mode = "k" })
-	return function(player: Player, ...): (boolean, string?)
-		local now = os.clock()
-		local state = states[player]
-		if not state then
-			state = { windowStart = now, count = 0, last = -math.huge }
-			states[player] = state
-		end
-
-		if options.Cooldown and now - state.last < options.Cooldown then
-			return false, "cooldown"
-		end
-		if options.RateLimit then
-			if now - state.windowStart >= options.Window then
-				state.windowStart = now
-				state.count = 0
-			end
-			if state.count >= options.RateLimit then
-				return false, "rate limit"
-			end
-		end
-		-- Consume abuse-control budget before validation so malformed traffic is
-		-- not able to run validators without being throttled.
-		state.last = now
-		state.count += 1
-
-		if options.Validate then
-			local ok, accepted, reason = pcall(options.Validate, player, ...)
-			if not ok then
-				warn(
-					string.format(
-						"[Framework] Validator for %s.%s errored: %s",
-						serviceName,
-						endpointName,
-						tostring(accepted)
-					)
-				)
-				return false, "validation failed"
-			end
-			if accepted ~= true then
-				return false, if type(reason) == "string" then reason else "validation failed"
-			end
-		end
-
-		return true
+function Server.OnStart()
+	if not finished then
+		startCompleted:Wait()
 	end
 end
 
 local function validateHandlers()
 	for _, service in serviceOrder do
 		for endpointName, descriptor in specifications[service] do
-			if descriptor._kind ~= "Signal" and type(service.Client[endpointName]) ~= "function" then
+			local kind = descriptor._kind
+			local value = service.Client[endpointName]
+			if (kind == "ClientSignal" or kind == "Method") and type(value) ~= "function" then
 				error(
 					string.format(
 						"[Framework] %s.Client:%s(Player, ...) must be implemented before Start().",
+						service.Name,
+						endpointName
+					),
+					3
+				)
+			elseif kind == "Property" and not Property.is(value) then
+				error(
+					string.format(
+						"[Framework] %s.Client.%s is a Property and must not be replaced.",
 						service.Name,
 						endpointName
 					),
@@ -428,121 +655,143 @@ local function createFolder(parent: Instance, name: string): Folder
 	return folder
 end
 
+local function newRemoteEvent(name: string, unreliable: boolean?, parent: Instance): RemoteEvent
+	-- UnreliableRemoteEvent shares RemoteEvent's API but may drop or reorder
+	-- events, and each payload is limited to roughly 900 bytes.
+	local remote = Instance.new(if unreliable then "UnreliableRemoteEvent" else "RemoteEvent") :: any
+	remote.Name = name
+	remote.Parent = parent
+	return remote
+end
+
+local function bindSignal(service: any, endpointName: string, remote: RemoteEvent)
+	local wrapper = {}
+	function wrapper:Fire(player: Player, ...)
+		remote:FireClient(player, ...)
+	end
+	function wrapper:FireAll(...)
+		remote:FireAllClients(...)
+	end
+	function wrapper:FireExcept(excludedPlayer: Player, ...)
+		for _, player in Players:GetPlayers() do
+			if player ~= excludedPlayer then
+				remote:FireClient(player, ...)
+			end
+		end
+	end
+	function wrapper:FireFor(targetPlayers: { Player }, ...)
+		for _, player in targetPlayers do
+			remote:FireClient(player, ...)
+		end
+	end
+	service.Client[endpointName] = table.freeze(wrapper)
+end
+
+local function bindClientSignal(service: any, endpointName: string, descriptor: Descriptor, remote: RemoteEvent)
+	local handler = service.Client[endpointName]
+	local gate = Gate.new(descriptor._options)
+	local topic = service.Name .. "." .. endpointName
+	remote.OnServerEvent:Connect(function(player, ...)
+		if gate then
+			local allowed, reason = gate(player, ...)
+			if not allowed then
+				throttledWarn(
+					player,
+					topic .. ":rejected",
+					string.format("[Framework] Rejected %s from %s (%s).", topic, player.Name, reason or "rejected")
+				)
+				return
+			end
+		end
+		local ok, message = pcall(handler, service.Client, player, ...)
+		if not ok then
+			throttledWarn(
+				player,
+				topic .. ":failed",
+				string.format("[Framework] %s handler failed: %s", topic, tostring(message))
+			)
+		end
+	end)
+end
+
+local function bindMethod(service: any, endpointName: string, descriptor: Descriptor, remote: RemoteFunction)
+	local handler = service.Client[endpointName]
+	local gate = Gate.new(descriptor._options)
+	local topic = service.Name .. "." .. endpointName
+	remote.OnServerInvoke = function(player, ...)
+		if gate then
+			local allowed, reason = gate(player, ...)
+			if not allowed then
+				throttledWarn(
+					player,
+					topic .. ":rejected",
+					string.format("[Framework] Rejected %s from %s (%s).", topic, player.Name, reason or "rejected")
+				)
+				error("[Framework] Request rejected.", 0)
+			end
+		end
+		local results = table.pack(pcall(handler, service.Client, player, ...))
+		if not results[1] then
+			-- Details stay on the server; the client only sees a generic failure.
+			throttledWarn(
+				player,
+				topic .. ":failed",
+				string.format("[Framework] %s request failed: %s", topic, tostring(results[2]))
+			)
+			error("[Framework] Request failed.", 0)
+		end
+		return table.unpack(results, 2, results.n)
+	end
+end
+
+local function bindPropertySnapshot(service: any, serviceFolder: Folder, names: { string })
+	-- One round trip gives a client every property's current value for it.
+	-- Clients request this once per service, so a small fixed limit suffices.
+	local gate = Gate.new({ RateLimit = 5, Window = 1 }) :: Gate.Check
+	local remote = Instance.new("RemoteFunction")
+	remote.Name = Constants.PROPERTY_SNAPSHOT
+	remote.OnServerInvoke = function(player)
+		if not gate(player) then
+			error("[Framework] Request rejected.", 0)
+		end
+		local snapshot = {}
+		for _, name in names do
+			snapshot[name] = service.Client[name]:GetFor(player)
+		end
+		return snapshot
+	end
+	remote.Parent = serviceFolder
+end
+
 local function bindService(root: Folder, service: any)
 	local serviceFolder = createFolder(root, service.Name)
 	local signalFolder = createFolder(serviceFolder, Constants.SIGNALS)
 	local clientSignalFolder = createFolder(serviceFolder, Constants.CLIENT_SIGNALS)
 	local methodFolder = createFolder(serviceFolder, Constants.METHODS)
+	local propertyFolder = createFolder(serviceFolder, Constants.PROPERTIES)
+	local propertyNames = {}
 
 	for endpointName, descriptor in specifications[service] do
 		local kind = descriptor._kind
 		if kind == "Signal" then
-			local remote = Instance.new("RemoteEvent")
-			remote.Name = endpointName
-			remote.Parent = signalFolder
-			local wrapper = {}
-			function wrapper:Fire(player: Player, ...)
-				remote:FireClient(player, ...)
-			end
-			function wrapper:FireAll(...)
-				remote:FireAllClients(...)
-			end
-			function wrapper:FireExcept(excludedPlayer: Player, ...)
-				for _, player in Players:GetPlayers() do
-					if player ~= excludedPlayer then
-						remote:FireClient(player, ...)
-					end
-				end
-			end
-			function wrapper:FireFor(targetPlayers: { Player }, ...)
-				for _, player in targetPlayers do
-					remote:FireClient(player, ...)
-				end
-			end
-			service.Client[endpointName] = table.freeze(wrapper)
+			local remote = newRemoteEvent(endpointName, descriptor._options.Unreliable, signalFolder)
+			bindSignal(service, endpointName, remote)
 		elseif kind == "ClientSignal" then
-			local handler = service.Client[endpointName]
-			if type(handler) ~= "function" then
-				error(
-					string.format(
-						"[Framework] %s.Client:%s(Player, ...) must be implemented before Start().",
-						service.Name,
-						endpointName
-					),
-					3
-				)
-			end
-			local gate = makeGate(service.Name, endpointName, descriptor._options)
-			local remote = Instance.new("RemoteEvent")
-			remote.Name = endpointName
-			remote.Parent = clientSignalFolder
-			remote.OnServerEvent:Connect(function(player, ...)
-				if gate then
-					local allowed, reason = gate(player, ...)
-					if not allowed then
-						warn(
-							string.format(
-								"[Framework] Rejected %s.%s from %s (%s).",
-								service.Name,
-								endpointName,
-								player.Name,
-								reason or "rejected"
-							)
-						)
-						return
-					end
-				end
-				local ok, message = pcall(handler, service.Client, player, ...)
-				if not ok then
-					warn(
-						string.format(
-							"[Framework] %s.%s handler failed: %s",
-							service.Name,
-							endpointName,
-							tostring(message)
-						)
-					)
-				end
-			end)
+			local remote = newRemoteEvent(endpointName, descriptor._options.Unreliable, clientSignalFolder)
+			bindClientSignal(service, endpointName, descriptor, remote)
 		elseif kind == "Method" then
-			local handler = service.Client[endpointName]
-			if type(handler) ~= "function" then
-				error(
-					string.format(
-						"[Framework] %s.Client:%s(Player, ...) must be implemented before Start().",
-						service.Name,
-						endpointName
-					),
-					3
-				)
-			end
-			local gate = makeGate(service.Name, endpointName, descriptor._options)
 			local remote = Instance.new("RemoteFunction")
 			remote.Name = endpointName
+			bindMethod(service, endpointName, descriptor, remote)
 			remote.Parent = methodFolder
-			remote.OnServerInvoke = function(player, ...)
-				if gate then
-					local allowed = gate(player, ...)
-					if not allowed then
-						error("[Framework] Request rejected.", 0)
-					end
-				end
-				local results = table.pack(pcall(handler, service.Client, player, ...))
-				if not results[1] then
-					warn(
-						string.format(
-							"[Framework] %s.%s request failed: %s",
-							service.Name,
-							endpointName,
-							tostring(results[2])
-						)
-					)
-					error("[Framework] Request failed.", 0)
-				end
-				return table.unpack(results, 2, results.n)
-			end
+		elseif kind == "Property" then
+			local remote = newRemoteEvent(endpointName, false, propertyFolder)
+			service.Client[endpointName]:_bind(remote)
+			table.insert(propertyNames, endpointName)
 		end
 	end
+	-- Created even with no properties so clients can wait for it unconditionally.
+	bindPropertySnapshot(service, serviceFolder, propertyNames)
 end
 
 function Server.Start()
@@ -551,17 +800,8 @@ function Server.Start()
 	end
 	started = true
 
-	for _, service in serviceOrder do
-		if service.Init ~= nil then
-			if type(service.Init) ~= "function" then
-				error(string.format("[Framework] %s.Init must be a function.", service.Name), 2)
-			end
-			local ok, message = pcall(service.Init, service)
-			if not ok then
-				error(string.format("[Framework] %s:Init() failed: %s", service.Name, tostring(message)), 2)
-			end
-		end
-	end
+	Lifecycle.validate(serviceOrder)
+	Lifecycle.init(serviceOrder)
 	validateHandlers()
 
 	local existing = ReplicatedStorage:FindFirstChild(Constants.NETWORK_ROOT)
@@ -578,25 +818,9 @@ function Server.Start()
 	ready.Value = true
 	ready.Parent = root
 
-	-- Validate every Start before spawning any, so a misconfigured service fails
-	-- Start() synchronously instead of after other services are already running.
-	for _, service in serviceOrder do
-		if service.Start ~= nil and type(service.Start) ~= "function" then
-			error(string.format("[Framework] %s.Start must be a function.", service.Name), 2)
-		end
-	end
-	-- Each Start runs on its own thread (in registration order) so a long-running
-	-- or yielding Start cannot block the services registered after it.
-	for _, service in serviceOrder do
-		if service.Start ~= nil then
-			task.spawn(function()
-				local ok, message = xpcall(service.Start, debug.traceback, service)
-				if not ok then
-					warn(string.format("[Framework] %s:Start() failed: %s", service.Name, tostring(message)))
-				end
-			end)
-		end
-	end
+	Lifecycle.start(serviceOrder)
+	finished = true
+	startCompleted:Fire()
 end
 
 return Server
@@ -618,8 +842,12 @@ return table.freeze({
 	SIGNALS = "Signals",
 	CLIENT_SIGNALS = "ClientSignals",
 	METHODS = "Methods",
+	PROPERTIES = "Properties",
+	PROPERTY_SNAPSHOT = "PropertySnapshot",
 	READY = "Ready",
 	REMOTE_TIMEOUT = 10,
+	-- Minimum seconds between repeated warnings for the same player and endpoint.
+	WARN_INTERVAL = 5,
 })
 ]]></string>
         </Properties>
@@ -631,19 +859,23 @@ return table.freeze({
 
 local Endpoint = {}
 
-export type Kind = "Signal" | "ClientSignal" | "Method"
+export type Kind = "Signal" | "ClientSignal" | "Method" | "Property"
 export type Options = {
 	RateLimit: number?,
 	Window: number?,
 	Cooldown: number?,
 	Validate: ((Player, ...any) -> (boolean, string?))?,
+	Unreliable: boolean?,
 }
 export type Descriptor = {
 	_kind: Kind,
 	_options: Options,
+	_initial: any,
 }
 
-local function validateOptions(options: Options?)
+local KINDS = { Signal = true, ClientSignal = true, Method = true, Property = true }
+
+local function validateOptions(kind: Kind, options: Options?)
 	if options == nil then
 		return
 	end
@@ -662,20 +894,32 @@ local function validateOptions(options: Options?)
 	if options.Validate ~= nil then
 		assert(type(options.Validate) == "function", "Validate must be a function")
 	end
+	if options.Unreliable ~= nil then
+		assert(type(options.Unreliable) == "boolean", "Unreliable must be a boolean")
+		if kind == "Method" then
+			error("Unreliable is only supported on Signal and ClientSignal", 3)
+		end
+	end
 end
 
 function Endpoint.new(kind: Kind, options: Options?): Descriptor
-	validateOptions(options)
+	validateOptions(kind, options)
 	return table.freeze({
 		_kind = kind,
 		_options = if options then table.clone(options) else {},
 	}) :: any
 end
 
+function Endpoint.property(initial: any): Descriptor
+	return table.freeze({
+		_kind = "Property",
+		_options = {},
+		_initial = initial,
+	}) :: any
+end
+
 function Endpoint.is(value: any): boolean
-	return type(value) == "table"
-		and (value._kind == "Signal" or value._kind == "ClientSignal" or value._kind == "Method")
-		and type(value._options) == "table"
+	return type(value) == "table" and KINDS[value._kind] == true and type(value._options) == "table"
 end
 
 return Endpoint
@@ -683,6 +927,174 @@ return Endpoint
         </Properties>
       </Item>
       <Item class="ModuleScript" referent="7">
+        <Properties>
+          <string name="Name">Gate</string>
+          <string name="Source"><![CDATA[--!strict
+-- Per-sender abuse gate for client-to-server endpoints: cooldown, token-bucket
+-- rate limit, then validation. Has no Roblox dependencies and takes an
+-- injectable clock so it can be unit tested outside Roblox.
+
+export type Options = {
+	RateLimit: number?,
+	Window: number?,
+	Cooldown: number?,
+	Validate: ((any, ...any) -> (boolean, string?))?,
+}
+export type Check = (sender: any, ...any) -> (boolean, string?)
+
+local Gate = {}
+
+function Gate.new(options: Options, clock: (() -> number)?): Check?
+	if options.RateLimit == nil and options.Cooldown == nil and options.Validate == nil then
+		return nil
+	end
+
+	local now = clock or os.clock
+	local cooldown = options.Cooldown
+	local validate = options.Validate
+	-- A token bucket refills continuously, so a client cannot fire a full
+	-- window's budget at the end of one window and again at the start of the next.
+	-- Capacity is at least one so fractional limits (e.g. 0.5 per second) work.
+	local capacity = if options.RateLimit then math.max(options.RateLimit, 1) else nil
+	local refillRate = if options.RateLimit then options.RateLimit / (options.Window :: number) else 0
+	local states = setmetatable({}, { __mode = "k" }) :: any
+
+	return function(sender: any, ...: any): (boolean, string?)
+		local time = now()
+		local state = states[sender]
+		if not state then
+			state = { tokens = capacity or 0, updated = time, last = -math.huge }
+			states[sender] = state
+		end
+
+		if cooldown and time - state.last < cooldown then
+			return false, "cooldown"
+		end
+		if capacity then
+			state.tokens = math.min(capacity, state.tokens + (time - state.updated) * refillRate)
+			state.updated = time
+			if state.tokens < 1 then
+				return false, "rate limit"
+			end
+			state.tokens -= 1
+		end
+		-- Budget is consumed before validation so malformed traffic cannot run
+		-- validators without being throttled.
+		state.last = time
+
+		if validate then
+			local ok, accepted, reason = pcall(validate, sender, ...)
+			if not ok then
+				return false, "validator errored: " .. tostring(accepted)
+			end
+			if accepted ~= true then
+				return false, if type(reason) == "string" then reason else "validation failed"
+			end
+		end
+
+		return true
+	end
+end
+
+return Gate
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">Lifecycle</string>
+          <string name="Source"><![CDATA[--!strict
+-- Lifecycle shared by services (server) and controllers (client).
+
+local Players = game:GetService("Players")
+
+local Lifecycle = {}
+
+local HOOKS = { "Init", "Start", "PlayerAdded", "PlayerRemoving" }
+
+-- Rejects non-function lifecycle members before anything runs, so a
+-- misconfigured object fails Framework.Start() synchronously. Errors are
+-- reported at the caller of Framework.Start().
+function Lifecycle.validate(order: { any })
+	for _, object in order do
+		for _, hook in HOOKS do
+			if object[hook] ~= nil and type(object[hook]) ~= "function" then
+				error(string.format("[Framework] %s.%s must be a function.", object.Name, hook), 3)
+			end
+		end
+	end
+end
+
+-- Every Init runs to completion, in registration order, before the next begins.
+function Lifecycle.init(order: { any })
+	for _, object in order do
+		if object.Init then
+			local ok, message = pcall(object.Init, object)
+			if not ok then
+				error(string.format("[Framework] %s:Init() failed: %s", object.Name, tostring(message)), 3)
+			end
+		end
+	end
+end
+
+local function spawnHook(object: any, hook: string, ...: any)
+	task.spawn(function(...)
+		local ok, message = xpcall(object[hook], debug.traceback, object, ...)
+		if not ok then
+			warn(string.format("[Framework] %s:%s() failed: %s", object.Name, hook, tostring(message)))
+		end
+	end, ...)
+end
+
+-- Each Start runs on its own thread (in registration order) so a long-running
+-- or yielding Start cannot block the objects registered after it. PlayerAdded
+-- then runs for every player already in the game and for each one who joins.
+function Lifecycle.start(order: { any })
+	local added, removing = {}, {}
+	for _, object in order do
+		if object.Start then
+			spawnHook(object, "Start")
+		end
+		if object.PlayerAdded then
+			table.insert(added, object)
+		end
+		if object.PlayerRemoving then
+			table.insert(removing, object)
+		end
+	end
+
+	if #added > 0 then
+		-- A player can appear both in GetPlayers() and in a pending PlayerAdded
+		-- event; track who was handled so each hook runs once per player.
+		local handled = setmetatable({}, { __mode = "k" }) :: any
+		local function onPlayerAdded(player: Player)
+			if handled[player] then
+				return
+			end
+			handled[player] = true
+			for _, object in added do
+				spawnHook(object, "PlayerAdded", player)
+			end
+		end
+		Players.PlayerAdded:Connect(onPlayerAdded)
+		for _, player in Players:GetPlayers() do
+			onPlayerAdded(player)
+		end
+	end
+	if #removing > 0 then
+		Players.PlayerRemoving:Connect(function(player: Player)
+			for _, object in removing do
+				spawnHook(object, "PlayerRemoving", player)
+			end
+		end)
+	end
+end
+
+return Lifecycle
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
         <Properties>
           <string name="Name">Loader</string>
           <string name="Source"><![CDATA[--!strict
@@ -716,7 +1128,113 @@ return Loader
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="8">
+      <Item class="ModuleScript" referent="10">
+        <Properties>
+          <string name="Name">Property</string>
+          <string name="Source"><![CDATA[--!strict
+-- Server half of a replicated property. A property holds one value for every
+-- player, plus optional per-player overrides, and pushes changes to clients
+-- over a single RemoteEvent once Framework.Start() publishes networking.
+
+local Players = game:GetService("Players")
+
+local Property = {}
+
+local ServerProperty = {}
+ServerProperty.__index = ServerProperty
+
+function Property.new(initial: any): any
+	return setmetatable({
+		_value = initial,
+		-- Overrides are boxed so a player can be overridden to nil.
+		_overrides = setmetatable({}, { __mode = "k" }),
+		_remote = nil,
+	}, ServerProperty)
+end
+
+function Property.is(value: any): boolean
+	return type(value) == "table" and getmetatable(value) == ServerProperty
+end
+
+function ServerProperty:Get(): any
+	return self._value
+end
+
+function ServerProperty:GetFor(player: Player): any
+	local box = self._overrides[player]
+	if box then
+		return box.value
+	end
+	return self._value
+end
+
+-- Sets the value for every player without an override. Setting an identical
+-- non-table value does nothing; tables always replicate, so set a table again
+-- after mutating it.
+function ServerProperty:Set(value: any)
+	if value == self._value and type(value) ~= "table" then
+		return
+	end
+	self._value = value
+	local remote = self._remote
+	if not remote then
+		return
+	end
+	if next(self._overrides) == nil then
+		remote:FireAllClients(value)
+		return
+	end
+	for _, player in Players:GetPlayers() do
+		if self._overrides[player] == nil then
+			remote:FireClient(player, value)
+		end
+	end
+end
+
+function ServerProperty:SetFor(player: Player, value: any)
+	self._overrides[player] = { value = value }
+	if self._remote then
+		self._remote:FireClient(player, value)
+	end
+end
+
+function ServerProperty:ClearFor(player: Player)
+	if self._overrides[player] == nil then
+		return
+	end
+	self._overrides[player] = nil
+	if self._remote then
+		self._remote:FireClient(player, self._value)
+	end
+end
+
+function ServerProperty:_bind(remote: RemoteEvent)
+	self._remote = remote
+end
+
+return Property
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="11">
+        <Properties>
+          <string name="Name">Signal</string>
+          <string name="Source"><![CDATA[--!strict
+-- Resolves GoodSignal. Wally installs declared dependencies beside this
+-- package; standalone model builds use the vendored fallback so
+-- Framework.rbxm stays self-contained.
+
+local root = script.Parent.Parent
+local vendor = root:FindFirstChild("Vendor")
+local module = (root.Parent and root.Parent:FindFirstChild("GoodSignal"))
+	or (vendor and vendor:FindFirstChild("GoodSignal"))
+assert(module, "[Framework] GoodSignal dependency is missing. Run wally install or use Framework.rbxm.")
+
+return require(module :: ModuleScript) :: any
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="12">
         <Properties>
           <string name="Name">Types</string>
           <string name="Source"><![CDATA[--!strict
@@ -726,6 +1244,7 @@ export type EndpointOptions = {
 	Window: number?,
 	Cooldown: number?,
 	Validate: ((Player, ...any) -> (boolean, string?))?,
+	Unreliable: boolean?,
 }
 
 export type Service = {
@@ -734,6 +1253,8 @@ export type Service = {
 	Client: { [string]: any }?,
 	Init: ((self: any) -> ())?,
 	Start: ((self: any) -> ())?,
+	PlayerAdded: ((self: any, player: Player) -> ())?,
+	PlayerRemoving: ((self: any, player: Player) -> ())?,
 	[string]: any,
 }
 
@@ -741,19 +1262,107 @@ export type Controller = {
 	Name: string,
 	Init: ((self: any) -> ())?,
 	Start: ((self: any) -> ())?,
+	PlayerAdded: ((self: any, player: Player) -> ())?,
+	PlayerRemoving: ((self: any, player: Player) -> ())?,
 	[string]: any,
+}
+
+export type Connection = {
+	Disconnect: (self: any) -> (),
+}
+
+-- Client-side shapes of a service's endpoints. Framework.GetService returns
+-- `any` on the client; cast it to a type built from these for autocomplete.
+
+-- Client view of Framework.Signal(): listen for events from the server.
+export type RemoteSignal<T...> = {
+	Connect: (self: any, callback: (T...) -> ()) -> Connection,
+	Once: (self: any, callback: (T...) -> ()) -> Connection,
+	Wait: (self: any) -> T...,
+}
+
+-- Client view of Framework.ClientSignal(): send events to the server.
+export type RemoteClientSignal<T...> = {
+	Fire: (self: any, T...) -> (),
+}
+
+-- Client view of Framework.Property(): read and watch a replicated value.
+export type RemoteProperty<T> = {
+	Get: (self: any) -> T,
+	Observe: (self: any, callback: (T) -> ()) -> Connection,
+	Changed: RemoteSignal<T>,
+}
+
+-- Server view of Framework.Signal() after Framework.Start().
+export type ServerSignal<T...> = {
+	Fire: (self: any, player: Player, T...) -> (),
+	FireAll: (self: any, T...) -> (),
+	FireExcept: (self: any, player: Player, T...) -> (),
+	FireFor: (self: any, players: { Player }, T...) -> (),
+}
+
+-- Server view of Framework.Property().
+export type ServerProperty<T> = {
+	Get: (self: any) -> T,
+	Set: (self: any, value: T) -> (),
+	GetFor: (self: any, player: Player) -> T,
+	SetFor: (self: any, player: Player, value: T) -> (),
+	ClearFor: (self: any, player: Player) -> (),
 }
 
 return table.freeze({})
 ]]></string>
         </Properties>
       </Item>
+      <Item class="ModuleScript" referent="13">
+        <Properties>
+          <string name="Name">WarnThrottle</string>
+          <string name="Source"><![CDATA[--!strict
+-- Limits warnings to one per (sender, topic) per interval so a client spamming
+-- rejected requests cannot flood server output. Suppressed warnings are counted
+-- and reported with the next one that is let through.
+
+export type Warn = (sender: any, topic: string, message: string) -> ()
+
+local WarnThrottle = {}
+
+function WarnThrottle.new(interval: number, emit: (string) -> (), clock: (() -> number)?): Warn
+	local now = clock or os.clock
+	local states = setmetatable({}, { __mode = "k" }) :: any
+
+	return function(sender: any, topic: string, message: string)
+		local time = now()
+		local topics = states[sender]
+		if not topics then
+			topics = {}
+			states[sender] = topics
+		end
+
+		local state = topics[topic]
+		if state and time - state.last < interval then
+			state.suppressed += 1
+			return
+		end
+
+		local suppressed = if state then state.suppressed else 0
+		topics[topic] = { last = time, suppressed = 0 }
+		if suppressed > 0 then
+			message ..= string.format(" (%d similar suppressed)", suppressed)
+		end
+		emit(message)
+	end
+end
+
+return WarnThrottle
+]]></string>
+        </Properties>
+      </Item>
     </Item>
-    <Item class="Folder" referent="9">
+    <Item class="Folder" referent="14">
       <Properties>
         <string name="Name">Vendor</string>
       </Properties>
-      <Item class="ModuleScript" referent="10">
+      <Item class="ModuleScript" referent="15">
         <Properties>
           <string name="Name">GoodSignal</string>
           <string name="Source"><![CDATA[--!nocheck

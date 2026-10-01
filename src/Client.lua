@@ -3,13 +3,17 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(script.Parent.Shared.Constants)
+local Lifecycle = require(script.Parent.Shared.Lifecycle)
 local Loader = require(script.Parent.Shared.Loader)
+local Signal = require(script.Parent.Shared.Signal)
 
 local Client = {}
 local controllers: { [string]: any } = {}
 local controllerOrder: { any } = {}
 local serviceProxies: { [string]: any } = {}
 local started = false
+local finished = false
+local startCompleted = Signal.new()
 
 local function registrationOpen()
 	if started then
@@ -53,6 +57,57 @@ local function waitFor(parent: Instance, name: string): Instance
 	return child
 end
 
+-- Read-only view of anything with Connect/Once/Wait (RBXScriptSignal or GoodSignal).
+local function listenOnly(event: any)
+	return table.freeze({
+		Connect = function(_, callback)
+			return event:Connect(callback)
+		end,
+		Once = function(_, callback)
+			return event:Once(callback)
+		end,
+		Wait = function(_)
+			return event:Wait()
+		end,
+	})
+end
+
+local function bindProperties(proxy: { [string]: any }, serviceFolder: Instance)
+	local remotes = waitFor(serviceFolder, Constants.PROPERTIES):GetChildren()
+	if #remotes == 0 then
+		return
+	end
+
+	local states = {}
+	for _, remote in remotes do
+		if remote:IsA("RemoteEvent") then
+			local state = { value = nil :: any, changed = Signal.new() }
+			states[remote.Name] = state
+			-- Listen before requesting the snapshot. Remotes are ordered, so a change
+			-- that arrives before the snapshot reply is older than the snapshot.
+			remote.OnClientEvent:Connect(function(value)
+				state.value = value
+				state.changed:Fire(value)
+			end)
+			proxy[remote.Name] = table.freeze({
+				Get = function(_)
+					return state.value
+				end,
+				Observe = function(_, callback)
+					task.spawn(callback, state.value)
+					return state.changed:Connect(callback)
+				end,
+				Changed = listenOnly(state.changed),
+			})
+		end
+	end
+
+	local snapshot = (waitFor(serviceFolder, Constants.PROPERTY_SNAPSHOT) :: RemoteFunction):InvokeServer()
+	for name, state in states do
+		state.value = snapshot[name]
+	end
+end
+
 function Client.GetService(name: string): any
 	if serviceProxies[name] then
 		return serviceProxies[name]
@@ -70,30 +125,22 @@ function Client.GetService(name: string): any
 		)
 	end
 
-	local proxy = {}
+	local proxy: { [string]: any } = {}
 	local signals = waitFor(serviceFolder, Constants.SIGNALS)
 	local clientSignals = waitFor(serviceFolder, Constants.CLIENT_SIGNALS)
 	local methods = waitFor(serviceFolder, Constants.METHODS)
 	for _, remote in signals:GetChildren() do
-		if remote:IsA("RemoteEvent") then
-			proxy[remote.Name] = table.freeze({
-				Connect = function(_, callback)
-					return remote.OnClientEvent:Connect(callback)
-				end,
-				Once = function(_, callback)
-					return remote.OnClientEvent:Once(callback)
-				end,
-				Wait = function(_)
-					return remote.OnClientEvent:Wait()
-				end,
-			})
+		-- BaseRemoteEvent covers both RemoteEvent and UnreliableRemoteEvent.
+		if remote:IsA("BaseRemoteEvent") then
+			proxy[remote.Name] = listenOnly((remote :: RemoteEvent).OnClientEvent)
 		end
 	end
 	for _, remote in clientSignals:GetChildren() do
-		if remote:IsA("RemoteEvent") then
+		if remote:IsA("BaseRemoteEvent") then
+			local event = remote :: RemoteEvent
 			proxy[remote.Name] = table.freeze({
 				Fire = function(_, ...)
-					remote:FireServer(...)
+					event:FireServer(...)
 				end,
 			})
 		end
@@ -107,6 +154,12 @@ function Client.GetService(name: string): any
 				return remote:InvokeServer(...)
 			end
 		end
+	end
+	bindProperties(proxy, serviceFolder)
+
+	-- Another thread may have built this proxy while the snapshot was in flight.
+	if serviceProxies[name] then
+		return serviceProxies[name]
 	end
 	serviceProxies[name] = table.freeze(proxy)
 	return serviceProxies[name]
@@ -125,39 +178,23 @@ function Client.AddServices(_folder: Instance): never
 	error("[Framework] AddServices() is server-only.", 2)
 end
 
+function Client.OnStart()
+	if not finished then
+		startCompleted:Wait()
+	end
+end
+
 function Client.Start()
 	if started then
 		error("[Framework] Framework.Start() has already been called.", 2)
 	end
 	started = true
-	for _, controller in controllerOrder do
-		if controller.Init ~= nil then
-			if type(controller.Init) ~= "function" then
-				error(string.format("[Framework] %s.Init must be a function.", controller.Name), 2)
-			end
-			local ok, message = pcall(controller.Init, controller)
-			if not ok then
-				error(string.format("[Framework] %s:Init() failed: %s", controller.Name, tostring(message)), 2)
-			end
-		end
-	end
-	for _, controller in controllerOrder do
-		if controller.Start ~= nil and type(controller.Start) ~= "function" then
-			error(string.format("[Framework] %s.Start must be a function.", controller.Name), 2)
-		end
-	end
-	-- Each Start runs on its own thread (in registration order) so a long-running
-	-- or yielding Start cannot block the controllers registered after it.
-	for _, controller in controllerOrder do
-		if controller.Start ~= nil then
-			task.spawn(function()
-				local ok, message = xpcall(controller.Start, debug.traceback, controller)
-				if not ok then
-					warn(string.format("[Framework] %s:Start() failed: %s", controller.Name, tostring(message)))
-				end
-			end)
-		end
-	end
+
+	Lifecycle.validate(controllerOrder)
+	Lifecycle.init(controllerOrder)
+	Lifecycle.start(controllerOrder)
+	finished = true
+	startCompleted:Fire()
 end
 
 return Client

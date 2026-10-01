@@ -9,6 +9,9 @@
         "Framework": {
           "$path": "src"
         }
+      },
+      "FrameworkExample": {
+        "$path": "examples/shared"
       }
     },
     "ServerScriptService": {

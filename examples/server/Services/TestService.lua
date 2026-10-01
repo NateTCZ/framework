@@ -7,6 +7,8 @@ local TestService = Framework.CreateService({
 	Name = "TestService",
 	Client = {
 		Updated = Framework.Signal(),
+		-- High-frequency data that is fine to drop uses an UnreliableRemoteEvent.
+		Pulse = Framework.Signal({ Unreliable = true }),
 		Submit = Framework.ClientSignal({
 			RateLimit = 5,
 			Window = 1,
@@ -15,6 +17,7 @@ local TestService = Framework.CreateService({
 			end,
 		}),
 		GetData = Framework.Method({ Cooldown = 0.1 }),
+		Score = Framework.Property(0),
 	},
 })
 
@@ -24,6 +27,21 @@ end
 
 function TestService:Start()
 	print("TestService started after every service finished Init")
+	-- A yielding loop in Start no longer blocks other services' Start.
+	while true do
+		self.Client.Pulse:FireAll(os.clock())
+		task.wait(0.1)
+	end
+end
+
+-- Runs for players already in the game when Start happens and for every
+-- player who joins afterward.
+function TestService:PlayerAdded(player: Player)
+	self.Client.Score:SetFor(player, 0)
+end
+
+function TestService:PlayerRemoving(player: Player)
+	print(player.Name, "left")
 end
 
 function TestService:ServerOnlyMethod(): string
@@ -39,7 +57,8 @@ end
 
 function TestService.Client:Submit(player: Player, value: string)
 	print(player.Name, value)
-	TestService.Client.Updated:Fire(player, value)
+	self.Updated:Fire(player, value)
+	self.Score:SetFor(player, self.Score:GetFor(player) + 1)
 end
 
 return TestService

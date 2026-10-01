@@ -1,0 +1,18 @@
+title = "Framework"
+gitRepoUrl = "https://github.com/NateTCZ/framework"
+gitSourceBranch = "main"
+changelog = false
+
+[docusaurus]
+url = "https://natetcz.github.io"
+baseUrl = "/framework/"
+tagline = "A small, typed Service/Controller framework for Roblox"
+
+[home]
+enabled = true
+includeReadme = true
+
+[navbar]
+items = [
+	{ href = "https://github.com/NateTCZ/framework", label = "GitHub", position = "right" },
+]
