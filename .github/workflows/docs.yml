@@ -30,6 +30,9 @@ jobs:
         with:
           node-version: 22
 
+      # Fails early with a clear message if Pages is not enabled for the repo.
+      - uses: actions/configure-pages@v5
+
       - name: Build site
         run: npx -y moonwave@1.4.2 build --code src --out-dir build/docs
 
