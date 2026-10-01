@@ -17,7 +17,7 @@ After publishing under your Wally scope, add:
 
 ```toml
 [dependencies]
-Framework = "natetcz/framework@0.1.3"
+Framework = "natetcz/framework@0.2.0"
 ```
 
 Then run `wally install` and map the generated Packages directory in Rojo. The
@@ -82,7 +82,7 @@ function ShopService.Client:GetShopData(player)
 end
 
 function ShopService.Client:PurchaseItem(player, itemId)
-    ShopService:Purchase(player, itemId)
+    self.Server:Purchase(player, itemId)
 end
 
 function ShopService:Purchase(player, itemId)
@@ -95,6 +95,10 @@ return ShopService
 The descriptor is captured by `CreateService`; defining the endpoint handler
 afterward intentionally replaces that entry in the server's `Client` table.
 
+Inside `Client` handlers, `self` is the service's `Client` table and
+`self.Server` refers back to the service itself, matching Knit. `Server` is a
+reserved name and cannot be declared as an endpoint. It is never replicated.
+
 Load and start on the server:
 
 ```lua
@@ -105,7 +109,11 @@ Framework.Start()
 Registration closes as soon as `Start` is called. Services initialize in their
 registration order. Every yielding `Init` completes before the next one begins,
 and all `Init` calls complete before networking is published or any `Start`
-runs. `Start` is single-use. Recursive module loading is sorted by full Instance
+runs. Each `Start` is then spawned on its own thread in registration order, so
+a long-running or yielding `Start` (such as a game loop) does not block the
+services after it. A `Start` that errors is warned with a traceback and does
+not stop the others. `Framework.Start()` is single-use. Controllers follow the
+same rules on the client. Recursive module loading is sorted by full Instance
 name for deterministic registration.
 
 ## Controllers
@@ -233,8 +241,8 @@ table lookups. Client service proxies are built once and cached.
 Runtime overhead exists only when networking is used: Roblox remote dispatch, a
 thin endpoint closure, a protected handler call, and—only when configured—a
 per-player gate lookup plus validation. `FireExcept` and `FireFor` iterate their
-target player sets when called. Lifecycle execution is sequential by design,
-which removes coroutine/Promise allocation and gives simple completion rules.
+target player sets when called. `Init` runs sequentially by design, giving simple completion
+rules without Promise allocation; each `Start` costs one `task.spawn`.
 
 ## Security model
 
@@ -293,6 +301,7 @@ The mapping is intentionally small:
 | `:KnitStart()` | `:Start()` |
 | `Knit.Start()` | `Framework.Start()` |
 | `Knit.CreateSignal()` | `Framework.Signal()` |
+| `self.Server` in `Client` handlers | `self.Server` (same) |
 
 ```lua
 -- Knit

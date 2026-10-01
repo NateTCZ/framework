@@ -39,6 +39,15 @@ function Server.CreateService(definition: any): any
 			error(string.format("[Framework] %s.Client must be a table.", definition.Name), 2)
 		end
 		for name, endpoint in client do
+			if name == "Server" then
+				error(
+					string.format(
+						"[Framework] %s.Client.Server is reserved; it refers back to the service table.",
+						definition.Name
+					),
+					2
+				)
+			end
 			if type(name) ~= "string" or not Endpoint.is(endpoint) then
 				error(
 					string.format(
@@ -54,6 +63,9 @@ function Server.CreateService(definition: any): any
 	else
 		definition.Client = {}
 	end
+	-- Knit-compatible back-reference so Client handlers can reach server-only
+	-- methods via self.Server. Never replicated: only declared specs create remotes.
+	definition.Client.Server = definition
 
 	services[definition.Name] = definition
 	table.insert(serviceOrder, definition)
@@ -321,15 +333,23 @@ function Server.Start()
 	ready.Value = true
 	ready.Parent = root
 
+	-- Validate every Start before spawning any, so a misconfigured service fails
+	-- Start() synchronously instead of after other services are already running.
+	for _, service in serviceOrder do
+		if service.Start ~= nil and type(service.Start) ~= "function" then
+			error(string.format("[Framework] %s.Start must be a function.", service.Name), 2)
+		end
+	end
+	-- Each Start runs on its own thread (in registration order) so a long-running
+	-- or yielding Start cannot block the services registered after it.
 	for _, service in serviceOrder do
 		if service.Start ~= nil then
-			if type(service.Start) ~= "function" then
-				error(string.format("[Framework] %s.Start must be a function.", service.Name), 2)
-			end
-			local ok, message = pcall(service.Start, service)
-			if not ok then
-				error(string.format("[Framework] %s:Start() failed: %s", service.Name, tostring(message)), 2)
-			end
+			task.spawn(function()
+				local ok, message = xpcall(service.Start, debug.traceback, service)
+				if not ok then
+					warn(string.format("[Framework] %s:Start() failed: %s", service.Name, tostring(message)))
+				end
+			end)
 		end
 	end
 end

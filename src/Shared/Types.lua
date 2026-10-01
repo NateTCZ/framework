@@ -9,6 +9,7 @@ export type EndpointOptions = {
 
 export type Service = {
 	Name: string,
+	-- Client.Server is set by CreateService and refers back to this service.
 	Client: { [string]: any }?,
 	Init: ((self: any) -> ())?,
 	Start: ((self: any) -> ())?,

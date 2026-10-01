@@ -33,7 +33,7 @@ end
 function TestService.Client:GetData(player: Player)
 	return {
 		UserId = player.UserId,
-		Message = TestService.SecondaryService:GetMessage(),
+		Message = self.Server.SecondaryService:GetMessage(),
 	}
 end
 

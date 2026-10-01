@@ -132,6 +132,9 @@ function Client.Start()
 	started = true
 	for _, controller in controllerOrder do
 		if controller.Init ~= nil then
+			if type(controller.Init) ~= "function" then
+				error(string.format("[Framework] %s.Init must be a function.", controller.Name), 2)
+			end
 			local ok, message = pcall(controller.Init, controller)
 			if not ok then
 				error(string.format("[Framework] %s:Init() failed: %s", controller.Name, tostring(message)), 2)
@@ -139,11 +142,20 @@ function Client.Start()
 		end
 	end
 	for _, controller in controllerOrder do
+		if controller.Start ~= nil and type(controller.Start) ~= "function" then
+			error(string.format("[Framework] %s.Start must be a function.", controller.Name), 2)
+		end
+	end
+	-- Each Start runs on its own thread (in registration order) so a long-running
+	-- or yielding Start cannot block the controllers registered after it.
+	for _, controller in controllerOrder do
 		if controller.Start ~= nil then
-			local ok, message = pcall(controller.Start, controller)
-			if not ok then
-				error(string.format("[Framework] %s:Start() failed: %s", controller.Name, tostring(message)), 2)
-			end
+			task.spawn(function()
+				local ok, message = xpcall(controller.Start, debug.traceback, controller)
+				if not ok then
+					warn(string.format("[Framework] %s:Start() failed: %s", controller.Name, tostring(message)))
+				end
+			end)
 		end
 	end
 end
